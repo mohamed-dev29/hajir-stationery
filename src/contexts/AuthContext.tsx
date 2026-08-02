@@ -20,20 +20,6 @@ const ROLE_ROUTE_ALLOWLIST: Record<UserRole, string[]> = {
   sales: ['/', '/pos', '/customers', '/reports'],
 };
 
-const LOCAL_DATA_KEYS = [
-  'haajir_products', 'haajir_categories', 'haajir_sales', 'haajir_customers',
-  'haajir_expenses', 'haajir_suppliers', 'haajir_feedback',
-  'haajir_money_accounts', 'haajir_money_transactions', 'haajir_user_profile',
-];
-
-function clearLocalDataCache() {
-  try {
-    LOCAL_DATA_KEYS.forEach((key) => localStorage.removeItem(key));
-  } catch {
-    // Storage may be unavailable or blocked by the browser.
-  }
-}
-
 function getRole(value: unknown): UserRole {
   return typeof value === 'string' && value in ROLE_LABELS ? value as UserRole : 'sales';
 }
@@ -77,10 +63,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         setUser(session?.user ? toAppUser(session.user) : null);
-        if (!session?.user) clearLocalDataCache();
       } catch {
         setUser(null);
-        clearLocalDataCache();
       } finally {
         setLoading(false);
       }
@@ -91,7 +75,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ? toAppUser(session.user) : null);
-      if (!session?.user) clearLocalDataCache();
       setLoading(false);
     });
     return () => subscription.unsubscribe();
@@ -133,7 +116,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       if (supabase) await supabase.auth.signOut();
     } finally {
-      clearLocalDataCache();
       setUser(null);
     }
   };

@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useUserProfile } from '@/hooks/useDatabase';
 import { toast } from 'sonner';
+import { clearTable, notifySupabaseDataChanged } from '@/lib/dbAdapter';
 
 export default function SettingsPage() {
   const { profile, updateProfile } = useUserProfile();
@@ -29,15 +30,34 @@ export default function SettingsPage() {
   };
 
   const handleReset = () => {
-    const keys = [
-      'haajir_products', 'haajir_categories', 'haajir_sales', 'haajir_customers',
-      'haajir_expenses', 'haajir_suppliers', 'haajir_feedback',
-      'haajir_money_accounts', 'haajir_money_transactions', 'haajir_user_profile'
-    ];
-    keys.forEach(k => localStorage.removeItem(k));
-    setShowResetDialog(false);
-    toast.success('All data has been reset');
-    window.location.reload();
+    void (async () => {
+      await Promise.all([
+        clearTable('products'),
+        clearTable('categories'),
+        clearTable('sales'),
+        clearTable('customers'),
+        clearTable('expenses'),
+        clearTable('suppliers'),
+        clearTable('feedback'),
+        clearTable('money_transactions'),
+        clearTable('money_accounts'),
+        clearTable('user_profile'),
+        clearTable('key_values', 'key'),
+      ]);
+      notifySupabaseDataChanged('products');
+      notifySupabaseDataChanged('categories');
+      notifySupabaseDataChanged('sales');
+      notifySupabaseDataChanged('customers');
+      notifySupabaseDataChanged('expenses');
+      notifySupabaseDataChanged('suppliers');
+      notifySupabaseDataChanged('feedback');
+      notifySupabaseDataChanged('money_accounts');
+      notifySupabaseDataChanged('money_transactions');
+      notifySupabaseDataChanged('user_profile');
+      setShowResetDialog(false);
+      toast.success('All data has been reset');
+      window.location.reload();
+    })();
   };
 
   return (

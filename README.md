@@ -71,3 +71,9 @@ export default defineConfig([
   },
 ])
 ```
+
+## Supabase
+
+The app mirrors writes to Supabase tables such as `products`, `customers`, `sales`, and `key_values`.
+
+If you see `Could not find the table ... in the schema cache`, apply the migration in [supabase/migrations/20260803_init.sql](supabase/migrations/20260803_init.sql) in the Supabase SQL editor or with `supabase db push`.

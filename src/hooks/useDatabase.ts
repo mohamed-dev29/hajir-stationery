@@ -25,7 +25,13 @@ const DB_KEYS = {
   userProfile: "haajir_user_profile",
 } as const;
 
-import { getItem, setItem, fetchTable, upsertMany } from "@/lib/dbAdapter";
+import {
+  fetchTable,
+  upsertMany,
+  deleteById,
+  notifySupabaseDataChanged,
+  onSupabaseDataChanged,
+} from "@/lib/dbAdapter";
 
 const TABLE_MAP: Record<keyof typeof DB_KEYS, string> = {
   products: 'products',
@@ -44,31 +50,47 @@ function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substr(2);
 }
 
+function useRemoteArrayState<T>(table: string, initialValue: T[] = []) {
+  const [value, setValue] = useState<T[]>(initialValue);
+
+  const load = useCallback(async () => {
+    const remote = await fetchTable<T>(table);
+    setValue(remote);
+  }, [table]);
+
+  useEffect(() => {
+    void load();
+    return onSupabaseDataChanged((changedTable) => {
+      if (changedTable === table) void load();
+    });
+  }, [load, table]);
+
+  return [value, setValue, load] as const;
+}
+
+function useRemoteSingletonState<T>(table: string, initialValue: T) {
+  const [value, setValue] = useState<T>(initialValue);
+
+  const load = useCallback(async () => {
+    const remote = await fetchTable<T>(table);
+    if (remote.length > 0) {
+      setValue(remote[0]);
+    }
+  }, [table]);
+
+  useEffect(() => {
+    void load();
+    return onSupabaseDataChanged((changedTable) => {
+      if (changedTable === table) void load();
+    });
+  }, [load, table]);
+
+  return [value, setValue, load] as const;
+}
+
 // ---- Categories ----
 export function useCategories() {
-  const [categories, setCategories] = useState<Category[]>(() =>
-    getItem(DB_KEYS.categories, []),
-  );
-
-  // fetch remote categories on mount if available
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Category>(TABLE_MAP.categories);
-        if (mounted && remote && remote.length > 0) {
-          setCategories(remote);
-          setItem(DB_KEYS.categories, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.categories, categories);
-    (async () => { try { await upsertMany(TABLE_MAP.categories, categories); } catch {} })();
-  }, [categories]);
+  const [categories, setCategories] = useRemoteArrayState<Category>(TABLE_MAP.categories, []);
 
   const addCategory = useCallback((cat: Omit<Category, "id" | "createdAt">) => {
     const newCat: Category = {
@@ -77,25 +99,40 @@ export function useCategories() {
       createdAt: new Date().toISOString(),
     };
     setCategories((prev) => [...prev, newCat]);
+    void (async () => {
+      await upsertMany(TABLE_MAP.categories, [newCat]);
+      notifySupabaseDataChanged(TABLE_MAP.categories);
+    })();
     return newCat;
   }, []);
 
   const updateCategory = useCallback(
     (id: string, updates: Partial<Category>) => {
+      let updatedCategory: Category | null = null;
       setCategories((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, ...updates } : c)),
+        prev.map((c) => {
+          if (c.id !== id) return c;
+          updatedCategory = { ...c, ...updates };
+          return updatedCategory;
+        }),
       );
+      if (updatedCategory) {
+        void (async () => {
+          await upsertMany(TABLE_MAP.categories, [updatedCategory!]);
+          notifySupabaseDataChanged(TABLE_MAP.categories);
+        })();
+      }
     },
     [],
   );
 
   const deleteCategory = useCallback((id: string) => {
     setCategories((prev) => prev.filter((c) => c.id !== id));
-    const products = getItem<Product[]>(DB_KEYS.products, []);
-    setItem(
-      DB_KEYS.products,
-      products.filter((p) => p.categoryId !== id),
-    );
+    void (async () => {
+      await deleteById(TABLE_MAP.categories, id);
+      notifySupabaseDataChanged(TABLE_MAP.categories);
+      notifySupabaseDataChanged(TABLE_MAP.products);
+    })();
   }, []);
 
   return { categories, addCategory, updateCategory, deleteCategory };
@@ -103,28 +140,7 @@ export function useCategories() {
 
 // ---- Products ----
 export function useProducts() {
-  const [products, setProducts] = useState<Product[]>(() =>
-    getItem(DB_KEYS.products, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Product>(TABLE_MAP.products);
-        if (mounted && remote && remote.length > 0) {
-          setProducts(remote);
-          setItem(DB_KEYS.products, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.products, products);
-    (async () => { try { await upsertMany(TABLE_MAP.products, products); } catch {} })();
-  }, [products]);
+  const [products, setProducts] = useRemoteArrayState<Product>(TABLE_MAP.products, []);
 
   const addProduct = useCallback(
     (prod: Omit<Product, "id" | "createdAt" | "updatedAt">) => {
@@ -136,28 +152,44 @@ export function useProducts() {
         updatedAt: now,
       };
       setProducts((prev) => [...prev, newProd]);
+      void (async () => {
+        await upsertMany(TABLE_MAP.products, [newProd]);
+        notifySupabaseDataChanged(TABLE_MAP.products);
+      })();
       return newProd;
     },
     [],
   );
 
   const updateProduct = useCallback((id: string, updates: Partial<Product>) => {
+    let updatedProduct: Product | null = null;
     setProducts((prev) =>
-      prev.map((p) =>
-        p.id === id
-          ? { ...p, ...updates, updatedAt: new Date().toISOString() }
-          : p,
-      ),
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        updatedProduct = { ...p, ...updates, updatedAt: new Date().toISOString() };
+        return updatedProduct;
+      }),
     );
+    if (updatedProduct) {
+      void (async () => {
+        await upsertMany(TABLE_MAP.products, [updatedProduct!]);
+        notifySupabaseDataChanged(TABLE_MAP.products);
+      })();
+    }
   }, []);
 
   const deleteProduct = useCallback((id: string) => {
     setProducts((prev) => prev.filter((p) => p.id !== id));
-    const sales = getItem<Sale[]>(DB_KEYS.sales, []);
-    setItem(
-      DB_KEYS.sales,
-      sales.filter((s) => s.items.every((i) => i.productId !== id)),
-    );
+    void (async () => {
+      await deleteById(TABLE_MAP.products, id);
+      const sales = await fetchTable<Sale>(TABLE_MAP.sales);
+      const removedSaleIds = sales
+        .filter((sale) => sale.items.some((item) => item.productId === id))
+        .map((sale) => sale.id);
+      await Promise.all(removedSaleIds.map((saleId) => deleteById(TABLE_MAP.sales, saleId)));
+      notifySupabaseDataChanged(TABLE_MAP.products);
+      if (removedSaleIds.length > 0) notifySupabaseDataChanged(TABLE_MAP.sales);
+    })();
   }, []);
 
   return { products, addProduct, updateProduct, deleteProduct };
@@ -165,26 +197,7 @@ export function useProducts() {
 
 // ---- Sales ----
 export function useSales() {
-  const [sales, setSales] = useState<Sale[]>(() => getItem(DB_KEYS.sales, []));
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Sale>(TABLE_MAP.sales);
-        if (mounted && remote && remote.length > 0) {
-          setSales(remote);
-          setItem(DB_KEYS.sales, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.sales, sales);
-    (async () => { try { await upsertMany(TABLE_MAP.sales, sales); } catch {} })();
-  }, [sales]);
+  const [sales, setSales] = useRemoteArrayState<Sale>(TABLE_MAP.sales, []);
 
   const addSale = useCallback(
     (sale: Omit<Sale, "id" | "createdAt" | "receiptNumber">) => {
@@ -197,66 +210,75 @@ export function useSales() {
       };
       setSales((prev) => [newSale, ...prev]);
 
-      // Update customer if exists
-      if (sale.customerPhone || sale.customerName) {
-        const customers = getItem<Customer[]>(DB_KEYS.customers, []);
-        const existingIndex = customers.findIndex(
-          (c) => sale.customerPhone && c.phone === sale.customerPhone,
-        );
-        if (existingIndex >= 0) {
-          customers[existingIndex].totalPurchases += 1;
-          customers[existingIndex].totalSpent += sale.total;
-          customers[existingIndex].lastPurchaseDate = new Date().toISOString();
-        } else if (sale.customerName) {
-          customers.push({
+      void (async () => {
+        await upsertMany(TABLE_MAP.sales, [newSale]);
+
+        if (sale.customerPhone || sale.customerName) {
+          const customers = await fetchTable<Customer>(TABLE_MAP.customers);
+          const existingIndex = customers.findIndex(
+            (customer) => sale.customerPhone && customer.phone === sale.customerPhone,
+          );
+          if (existingIndex >= 0) {
+            customers[existingIndex] = {
+              ...customers[existingIndex],
+              totalPurchases: customers[existingIndex].totalPurchases + 1,
+              totalSpent: customers[existingIndex].totalSpent + sale.total,
+              lastPurchaseDate: new Date().toISOString(),
+            };
+            await upsertMany(TABLE_MAP.customers, [customers[existingIndex]]);
+          } else if (sale.customerName) {
+            const newCustomer: Customer = {
+              id: generateId(),
+              name: sale.customerName,
+              phone: sale.customerPhone || "",
+              email: "",
+              address: "",
+              totalPurchases: 1,
+              totalSpent: sale.total,
+              lastPurchaseDate: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+            };
+            await upsertMany(TABLE_MAP.customers, [newCustomer]);
+          }
+          notifySupabaseDataChanged(TABLE_MAP.customers);
+        }
+
+        const products = await fetchTable<Product>(TABLE_MAP.products);
+        const changedProducts = products
+          .map((product) => {
+            const soldItem = sale.items.find((item) => item.productId === product.id);
+            if (!soldItem) return null;
+            return { ...product, stock: Math.max(0, product.stock - soldItem.quantity) };
+          })
+          .filter((product): product is Product => product !== null);
+        if (changedProducts.length > 0) {
+          await upsertMany(TABLE_MAP.products, changedProducts);
+          notifySupabaseDataChanged(TABLE_MAP.products);
+        }
+
+        const accounts = await fetchTable<MoneyAccount>(TABLE_MAP.moneyAccounts);
+        const cashAccount = accounts.find((account) => account.type === "cash");
+        if (cashAccount) {
+          const updatedAccount = { ...cashAccount, balance: cashAccount.balance + sale.total };
+          const transaction: MoneyTransaction = {
             id: generateId(),
-            name: sale.customerName,
-            phone: sale.customerPhone || "",
-            email: "",
-            address: "",
-            totalPurchases: 1,
-            totalSpent: sale.total,
-            lastPurchaseDate: new Date().toISOString(),
+            accountId: cashAccount.id,
+            type: "income",
+            amount: sale.total,
+            description: `Sale ${receiptNumber}`,
+            category: "Sales",
+            date: new Date().toISOString().split("T")[0],
+            reference: receiptNumber,
             createdAt: new Date().toISOString(),
-          });
+          };
+          await upsertMany(TABLE_MAP.moneyAccounts, [updatedAccount]);
+          await upsertMany(TABLE_MAP.moneyTransactions, [transaction]);
+          notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+          notifySupabaseDataChanged(TABLE_MAP.moneyTransactions);
         }
-        setItem(DB_KEYS.customers, customers);
-      }
 
-      // Update product stock
-      const products = getItem<Product[]>(DB_KEYS.products, []);
-      const updatedProducts = products.map((p) => {
-        const soldItem = sale.items.find((i) => i.productId === p.id);
-        if (soldItem) {
-          return { ...p, stock: Math.max(0, p.stock - soldItem.quantity) };
-        }
-        return p;
-      });
-      setItem(DB_KEYS.products, updatedProducts);
-
-      // Add money transaction
-      const accounts = getItem<MoneyAccount[]>(DB_KEYS.moneyAccounts, []);
-      const cashAccount = accounts.find((a) => a.type === "cash");
-      if (cashAccount) {
-        const transactions = getItem<MoneyTransaction[]>(
-          DB_KEYS.moneyTransactions,
-          [],
-        );
-        transactions.push({
-          id: generateId(),
-          accountId: cashAccount.id,
-          type: "income",
-          amount: sale.total,
-          description: `Sale ${receiptNumber}`,
-          category: "Sales",
-          date: new Date().toISOString().split("T")[0],
-          reference: receiptNumber,
-          createdAt: new Date().toISOString(),
-        });
-        cashAccount.balance += sale.total;
-        setItem(DB_KEYS.moneyAccounts, accounts);
-        setItem(DB_KEYS.moneyTransactions, transactions);
-      }
+        notifySupabaseDataChanged(TABLE_MAP.sales);
+      })();
 
       return newSale;
     },
@@ -265,6 +287,10 @@ export function useSales() {
 
   const deleteSale = useCallback((id: string) => {
     setSales((prev) => prev.filter((s) => s.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.sales, id);
+      notifySupabaseDataChanged(TABLE_MAP.sales);
+    })();
   }, []);
 
   return { sales, addSale, deleteSale };
@@ -272,28 +298,7 @@ export function useSales() {
 
 // ---- Customers ----
 export function useCustomers() {
-  const [customers, setCustomers] = useState<Customer[]>(() =>
-    getItem(DB_KEYS.customers, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Customer>(TABLE_MAP.customers);
-        if (mounted && remote && remote.length > 0) {
-          setCustomers(remote);
-          setItem(DB_KEYS.customers, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.customers, customers);
-    (async () => { try { await upsertMany(TABLE_MAP.customers, customers); } catch {} })();
-  }, [customers]);
+  const [customers, setCustomers] = useRemoteArrayState<Customer>(TABLE_MAP.customers, []);
 
   const addCustomer = useCallback(
     (
@@ -315,6 +320,10 @@ export function useCustomers() {
         createdAt: new Date().toISOString(),
       };
       setCustomers((prev) => [...prev, newCust]);
+      void (async () => {
+        await upsertMany(TABLE_MAP.customers, [newCust]);
+        notifySupabaseDataChanged(TABLE_MAP.customers);
+      })();
       return newCust;
     },
     [],
@@ -322,15 +331,30 @@ export function useCustomers() {
 
   const updateCustomer = useCallback(
     (id: string, updates: Partial<Customer>) => {
+      let updatedCustomer: Customer | null = null;
       setCustomers((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, ...updates } : c)),
+        prev.map((c) => {
+          if (c.id !== id) return c;
+          updatedCustomer = { ...c, ...updates };
+          return updatedCustomer;
+        }),
       );
+      if (updatedCustomer) {
+        void (async () => {
+          await upsertMany(TABLE_MAP.customers, [updatedCustomer!]);
+          notifySupabaseDataChanged(TABLE_MAP.customers);
+        })();
+      }
     },
     [],
   );
 
   const deleteCustomer = useCallback((id: string) => {
     setCustomers((prev) => prev.filter((c) => c.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.customers, id);
+      notifySupabaseDataChanged(TABLE_MAP.customers);
+    })();
   }, []);
 
   return { customers, addCustomer, updateCustomer, deleteCustomer };
@@ -338,28 +362,7 @@ export function useCustomers() {
 
 // ---- Expenses ----
 export function useExpenses() {
-  const [expenses, setExpenses] = useState<Expense[]>(() =>
-    getItem(DB_KEYS.expenses, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Expense>(TABLE_MAP.expenses);
-        if (mounted && remote && remote.length > 0) {
-          setExpenses(remote);
-          setItem(DB_KEYS.expenses, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.expenses, expenses);
-    (async () => { try { await upsertMany(TABLE_MAP.expenses, expenses); } catch {} })();
-  }, [expenses]);
+  const [expenses, setExpenses] = useRemoteArrayState<Expense>(TABLE_MAP.expenses, []);
 
   const addExpense = useCallback((exp: Omit<Expense, "id" | "createdAt">) => {
     const newExp: Expense = {
@@ -368,42 +371,59 @@ export function useExpenses() {
       createdAt: new Date().toISOString(),
     };
     setExpenses((prev) => [newExp, ...prev]);
+    void (async () => {
+      await upsertMany(TABLE_MAP.expenses, [newExp]);
 
-    // Deduct from cash account
-    const accounts = getItem<MoneyAccount[]>(DB_KEYS.moneyAccounts, []);
-    const cashAccount = accounts.find((a) => a.type === "cash");
-    if (cashAccount) {
-      const transactions = getItem<MoneyTransaction[]>(
-        DB_KEYS.moneyTransactions,
-        [],
-      );
-      transactions.push({
-        id: generateId(),
-        accountId: cashAccount.id,
-        type: "expense",
-        amount: exp.amount,
-        description: exp.title,
-        category: exp.category,
-        date: exp.date,
-        reference: `EXP-${Date.now().toString(36).toUpperCase()}`,
-        createdAt: new Date().toISOString(),
-      });
-      cashAccount.balance -= exp.amount;
-      setItem(DB_KEYS.moneyAccounts, accounts);
-      setItem(DB_KEYS.moneyTransactions, transactions);
-    }
+      const accounts = await fetchTable<MoneyAccount>(TABLE_MAP.moneyAccounts);
+      const cashAccount = accounts.find((account) => account.type === "cash");
+      if (cashAccount) {
+        const updatedAccount = { ...cashAccount, balance: cashAccount.balance - exp.amount };
+        const transaction: MoneyTransaction = {
+          id: generateId(),
+          accountId: cashAccount.id,
+          type: "expense",
+          amount: exp.amount,
+          description: exp.title,
+          category: exp.category,
+          date: exp.date,
+          reference: `EXP-${Date.now().toString(36).toUpperCase()}`,
+          createdAt: new Date().toISOString(),
+        };
+        await upsertMany(TABLE_MAP.moneyAccounts, [updatedAccount]);
+        await upsertMany(TABLE_MAP.moneyTransactions, [transaction]);
+        notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+        notifySupabaseDataChanged(TABLE_MAP.moneyTransactions);
+      }
+
+      notifySupabaseDataChanged(TABLE_MAP.expenses);
+    })();
 
     return newExp;
   }, []);
 
   const updateExpense = useCallback((id: string, updates: Partial<Expense>) => {
+    let updatedExpense: Expense | null = null;
     setExpenses((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, ...updates } : e)),
+      prev.map((e) => {
+        if (e.id !== id) return e;
+        updatedExpense = { ...e, ...updates };
+        return updatedExpense;
+      }),
     );
+    if (updatedExpense) {
+      void (async () => {
+        await upsertMany(TABLE_MAP.expenses, [updatedExpense!]);
+        notifySupabaseDataChanged(TABLE_MAP.expenses);
+      })();
+    }
   }, []);
 
   const deleteExpense = useCallback((id: string) => {
     setExpenses((prev) => prev.filter((e) => e.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.expenses, id);
+      notifySupabaseDataChanged(TABLE_MAP.expenses);
+    })();
   }, []);
 
   return { expenses, addExpense, updateExpense, deleteExpense };
@@ -411,28 +431,7 @@ export function useExpenses() {
 
 // ---- Suppliers ----
 export function useSuppliers() {
-  const [suppliers, setSuppliers] = useState<Supplier[]>(() =>
-    getItem(DB_KEYS.suppliers, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Supplier>(TABLE_MAP.suppliers);
-        if (mounted && remote && remote.length > 0) {
-          setSuppliers(remote);
-          setItem(DB_KEYS.suppliers, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.suppliers, suppliers);
-    (async () => { try { await upsertMany(TABLE_MAP.suppliers, suppliers); } catch {} })();
-  }, [suppliers]);
+  const [suppliers, setSuppliers] = useRemoteArrayState<Supplier>(TABLE_MAP.suppliers, []);
 
   const addSupplier = useCallback(
     (sup: Omit<Supplier, "id" | "createdAt" | "totalSupplies">) => {
@@ -443,6 +442,10 @@ export function useSuppliers() {
         createdAt: new Date().toISOString(),
       };
       setSuppliers((prev) => [...prev, newSup]);
+      void (async () => {
+        await upsertMany(TABLE_MAP.suppliers, [newSup]);
+        notifySupabaseDataChanged(TABLE_MAP.suppliers);
+      })();
       return newSup;
     },
     [],
@@ -450,15 +453,30 @@ export function useSuppliers() {
 
   const updateSupplier = useCallback(
     (id: string, updates: Partial<Supplier>) => {
+      let updatedSupplier: Supplier | null = null;
       setSuppliers((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+        prev.map((s) => {
+          if (s.id !== id) return s;
+          updatedSupplier = { ...s, ...updates };
+          return updatedSupplier;
+        }),
       );
+      if (updatedSupplier) {
+        void (async () => {
+          await upsertMany(TABLE_MAP.suppliers, [updatedSupplier!]);
+          notifySupabaseDataChanged(TABLE_MAP.suppliers);
+        })();
+      }
     },
     [],
   );
 
   const deleteSupplier = useCallback((id: string) => {
     setSuppliers((prev) => prev.filter((s) => s.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.suppliers, id);
+      notifySupabaseDataChanged(TABLE_MAP.suppliers);
+    })();
   }, []);
 
   return { suppliers, addSupplier, updateSupplier, deleteSupplier };
@@ -466,28 +484,7 @@ export function useSuppliers() {
 
 // ---- Feedback ----
 export function useFeedback() {
-  const [feedback, setFeedback] = useState<Feedback[]>(() =>
-    getItem(DB_KEYS.feedback, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<Feedback>(TABLE_MAP.feedback);
-        if (mounted && remote && remote.length > 0) {
-          setFeedback(remote);
-          setItem(DB_KEYS.feedback, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.feedback, feedback);
-    (async () => { try { await upsertMany(TABLE_MAP.feedback, feedback); } catch {} })();
-  }, [feedback]);
+  const [feedback, setFeedback] = useRemoteArrayState<Feedback>(TABLE_MAP.feedback, []);
 
   const addFeedback = useCallback((fb: Omit<Feedback, "id" | "createdAt">) => {
     const newFb: Feedback = {
@@ -496,11 +493,19 @@ export function useFeedback() {
       createdAt: new Date().toISOString(),
     };
     setFeedback((prev) => [newFb, ...prev]);
+    void (async () => {
+      await upsertMany(TABLE_MAP.feedback, [newFb]);
+      notifySupabaseDataChanged(TABLE_MAP.feedback);
+    })();
     return newFb;
   }, []);
 
   const deleteFeedback = useCallback((id: string) => {
     setFeedback((prev) => prev.filter((f) => f.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.feedback, id);
+      notifySupabaseDataChanged(TABLE_MAP.feedback);
+    })();
   }, []);
 
   return { feedback, addFeedback, deleteFeedback };
@@ -508,45 +513,33 @@ export function useFeedback() {
 
 // ---- Money Accounts ----
 export function useMoneyAccounts() {
-  const [accounts, setAccounts] = useState<MoneyAccount[]>(() => {
-    const stored = getItem<MoneyAccount[]>(DB_KEYS.moneyAccounts, []);
-    if (stored.length === 0) {
-      const defaultAccounts: MoneyAccount[] = [
-        {
-          id: generateId(),
-          name: "Cash in Hand",
-          type: "cash",
-          balance: 0,
-          description: "Main cash register",
-          createdAt: new Date().toISOString(),
-        },
-        {
-          id: generateId(),
-          name: "Bank Account",
-          type: "bank",
-          balance: 0,
-          description: "Primary bank account",
-          createdAt: new Date().toISOString(),
-        },
-        {
-          id: generateId(),
-          name: "Mobile Money",
-          type: "mobile",
-          balance: 0,
-          description: "Mobile payment wallet",
-          createdAt: new Date().toISOString(),
-        },
-      ];
-      setItem(DB_KEYS.moneyAccounts, defaultAccounts);
-      return defaultAccounts;
-    }
-    return stored;
-  });
-
-  useEffect(() => {
-    setItem(DB_KEYS.moneyAccounts, accounts);
-    (async () => { try { await upsertMany(TABLE_MAP.moneyAccounts, accounts); } catch {} })();
-  }, [accounts]);
+  const defaultAccounts: MoneyAccount[] = [
+    {
+      id: generateId(),
+      name: "Cash in Hand",
+      type: "cash",
+      balance: 0,
+      description: "Main cash register",
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: generateId(),
+      name: "Bank Account",
+      type: "bank",
+      balance: 0,
+      description: "Primary bank account",
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: generateId(),
+      name: "Mobile Money",
+      type: "mobile",
+      balance: 0,
+      description: "Mobile payment wallet",
+      createdAt: new Date().toISOString(),
+    },
+  ];
+  const [accounts, setAccounts] = useRemoteArrayState<MoneyAccount>(TABLE_MAP.moneyAccounts, defaultAccounts);
 
   const addAccount = useCallback(
     (acc: Omit<MoneyAccount, "id" | "createdAt">) => {
@@ -556,6 +549,10 @@ export function useMoneyAccounts() {
         createdAt: new Date().toISOString(),
       };
       setAccounts((prev) => [...prev, newAcc]);
+      void (async () => {
+        await upsertMany(TABLE_MAP.moneyAccounts, [newAcc]);
+        notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+      })();
       return newAcc;
     },
     [],
@@ -563,15 +560,31 @@ export function useMoneyAccounts() {
 
   const updateAccount = useCallback(
     (id: string, updates: Partial<MoneyAccount>) => {
+      let updatedAccount: MoneyAccount | null = null;
       setAccounts((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, ...updates } : a)),
+        prev.map((a) => {
+          if (a.id !== id) return a;
+          updatedAccount = { ...a, ...updates };
+          return updatedAccount;
+        }),
       );
+      if (updatedAccount) {
+        void (async () => {
+          await upsertMany(TABLE_MAP.moneyAccounts, [updatedAccount!]);
+          notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+        })();
+      }
     },
     [],
   );
 
   const deleteAccount = useCallback((id: string) => {
     setAccounts((prev) => prev.filter((a) => a.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.moneyAccounts, id);
+      notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+      notifySupabaseDataChanged(TABLE_MAP.moneyTransactions);
+    })();
   }, []);
 
   return { accounts, addAccount, updateAccount, deleteAccount };
@@ -579,28 +592,7 @@ export function useMoneyAccounts() {
 
 // ---- Money Transactions ----
 export function useMoneyTransactions() {
-  const [transactions, setTransactions] = useState<MoneyTransaction[]>(() =>
-    getItem(DB_KEYS.moneyTransactions, []),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<MoneyTransaction>(TABLE_MAP.moneyTransactions);
-        if (mounted && remote && remote.length > 0) {
-          setTransactions(remote);
-          setItem(DB_KEYS.moneyTransactions, remote);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.moneyTransactions, transactions);
-    (async () => { try { await upsertMany(TABLE_MAP.moneyTransactions, transactions); } catch {} })();
-  }, [transactions]);
+  const [transactions, setTransactions] = useRemoteArrayState<MoneyTransaction>(TABLE_MAP.moneyTransactions, []);
 
   const addTransaction = useCallback(
     (tx: Omit<MoneyTransaction, "id" | "createdAt">) => {
@@ -610,15 +602,27 @@ export function useMoneyTransactions() {
         createdAt: new Date().toISOString(),
       };
       setTransactions((prev) => [newTx, ...prev]);
+      void (async () => {
+        await upsertMany(TABLE_MAP.moneyTransactions, [newTx]);
 
-      // Update account balance
-      const accounts = getItem<MoneyAccount[]>(DB_KEYS.moneyAccounts, []);
-      const account = accounts.find((a) => a.id === tx.accountId);
-      if (account) {
-        if (tx.type === "income") account.balance += tx.amount;
-        else if (tx.type === "expense") account.balance -= tx.amount;
-        setItem(DB_KEYS.moneyAccounts, accounts);
-      }
+        const accounts = await fetchTable<MoneyAccount>(TABLE_MAP.moneyAccounts);
+        const account = accounts.find((entry) => entry.id === tx.accountId);
+        if (account) {
+          const updatedAccount = {
+            ...account,
+            balance:
+              tx.type === "income"
+                ? account.balance + tx.amount
+                : tx.type === "expense"
+                  ? account.balance - tx.amount
+                  : account.balance,
+          };
+          await upsertMany(TABLE_MAP.moneyAccounts, [updatedAccount]);
+          notifySupabaseDataChanged(TABLE_MAP.moneyAccounts);
+        }
+
+        notifySupabaseDataChanged(TABLE_MAP.moneyTransactions);
+      })();
 
       return newTx;
     },
@@ -627,6 +631,10 @@ export function useMoneyTransactions() {
 
   const deleteTransaction = useCallback((id: string) => {
     setTransactions((prev) => prev.filter((t) => t.id !== id));
+    void (async () => {
+      await deleteById(TABLE_MAP.moneyTransactions, id);
+      notifySupabaseDataChanged(TABLE_MAP.moneyTransactions);
+    })();
   }, []);
 
   return { transactions, addTransaction, deleteTransaction };
@@ -634,37 +642,23 @@ export function useMoneyTransactions() {
 
 // ---- User Profile ----
 export function useUserProfile() {
-  const [profile, setProfile] = useState<UserProfile>(() =>
-    getItem(DB_KEYS.userProfile, {
-      name: "",
-      email: "",
-      phone: "+251 92 923 2959",
-      businessName: "Haajir Stationery",
-      address: "",
-    }),
-  );
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const remote = await fetchTable<UserProfile>(TABLE_MAP.userProfile);
-        if (mounted && remote && remote.length > 0) {
-          setProfile(remote[0] as UserProfile);
-          setItem(DB_KEYS.userProfile, remote[0]);
-        }
-      } catch {}
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    setItem(DB_KEYS.userProfile, profile);
-    (async () => { try { await upsertMany(TABLE_MAP.userProfile, [profile]); } catch {} })();
-  }, [profile]);
+  const [profile, setProfile] = useRemoteSingletonState<UserProfile>(TABLE_MAP.userProfile, {
+    name: "",
+    email: "",
+    phone: "+251 92 923 2959",
+    businessName: "Haajir Stationery",
+    address: "",
+  });
 
   const updateProfile = useCallback((updates: Partial<UserProfile>) => {
-    setProfile((prev) => ({ ...prev, ...updates }));
+    setProfile((prev) => {
+      const next = { ...prev, ...updates };
+      void (async () => {
+        await upsertMany(TABLE_MAP.userProfile, [next]);
+        notifySupabaseDataChanged(TABLE_MAP.userProfile);
+      })();
+      return next;
+    });
   }, []);
 
   return { profile, updateProfile };
@@ -672,8 +666,13 @@ export function useUserProfile() {
 
 // ---- Analytics ----
 export function useAnalytics() {
+  const [sales] = useRemoteArrayState<Sale>(TABLE_MAP.sales, []);
+  const [expenses] = useRemoteArrayState<Expense>(TABLE_MAP.expenses, []);
+  const [products] = useRemoteArrayState<Product>(TABLE_MAP.products, []);
+  const [customers] = useRemoteArrayState<Customer>(TABLE_MAP.customers, []);
+  const [suppliers] = useRemoteArrayState<Supplier>(TABLE_MAP.suppliers, []);
+
   const getSalesByDateRange = useCallback((range: string): Sale[] => {
-    const sales = getItem<Sale[]>(DB_KEYS.sales, []);
     const now = new Date();
     const start = new Date();
 
@@ -698,12 +697,6 @@ export function useAnalytics() {
   }, []);
 
   const getKPIs = useCallback(() => {
-    const sales = getItem<Sale[]>(DB_KEYS.sales, []);
-    const expenses = getItem<Expense[]>(DB_KEYS.expenses, []);
-    const products = getItem<Product[]>(DB_KEYS.products, []);
-    const customers = getItem<Customer[]>(DB_KEYS.customers, []);
-    const suppliers = getItem<Supplier[]>(DB_KEYS.suppliers, []);
-
     const totalSales = sales.reduce((sum, s) => sum + s.total, 0);
     const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
     const netProfit = totalSales - totalExpenses;
@@ -742,8 +735,6 @@ export function useAnalytics() {
           s.total -
           s.items.reduce((sum, i) => sum + i.unitPrice * 0.6 * i.quantity, 0);
       });
-
-      const expenses = getItem<Expense[]>(DB_KEYS.expenses, []);
       expenses.forEach((e) => {
         const date = new Date(e.date).toLocaleDateString("en-US", {
           month: "short",
@@ -761,7 +752,6 @@ export function useAnalytics() {
   );
 
   const getTopProducts = useCallback(() => {
-    const sales = getItem<Sale[]>(DB_KEYS.sales, []);
     const productSales: Record<
       string,
       { name: string; quantity: number; revenue: number }
@@ -787,7 +777,6 @@ export function useAnalytics() {
   }, []);
 
   const getRecentSales = useCallback((limit = 10) => {
-    const sales = getItem<Sale[]>(DB_KEYS.sales, []);
     return sales.slice(0, limit);
   }, []);
 
