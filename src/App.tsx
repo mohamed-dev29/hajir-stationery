@@ -81,8 +81,8 @@ function LoginScreen() {
         </div>
 
         <div className="mb-4 flex rounded-xl border border-gray-200 p-1">
-          <button type="button" className={`flex-1 rounded-lg px-3 py-2 text-sm ${mode === 'sign-in' ? 'bg-[#2D6A4F] text-white' : 'text-gray-600'}`} onClick={() => setMode('sign-in')}>Sign In</button>
-          <button type="button" className={`flex-1 rounded-lg px-3 py-2 text-sm ${mode === 'sign-up' ? 'bg-[#2D6A4F] text-white' : 'text-gray-600'}`} onClick={() => setMode('sign-up')}>Sign Up</button>
+          {/* <button type="button" className={`flex-1 rounded-lg px-3 py-2 text-sm ${mode === 'sign-in' ? 'bg-[#2D6A4F] text-white' : 'text-gray-600'}`} onClick={() => setMode('sign-in')}>Sign In</button> */}
+          {/* <button type="button" className={`flex-1 rounded-lg px-3 py-2 text-sm ${mode === 'sign-up' ? 'bg-[#2D6A4F] text-white' : 'text-gray-600'}`} onClick={() => setMode('sign-up')}>Sign Up</button> */}
         </div>
 
         <form onSubmit={submit} className="space-y-3">
