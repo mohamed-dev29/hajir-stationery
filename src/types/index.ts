@@ -121,6 +121,15 @@ export interface UserProfile {
   address: string;
 }
 
+export type UserRole = "admin" | "manager" | "sales";
+
+export interface AppUser {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+}
+
 export type DateRange = "today" | "week" | "month" | "year" | "all";
 
 export interface DashboardKPI {
